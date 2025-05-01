@@ -1,12 +1,20 @@
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Link } from "react-router-dom";
 import { FiArrowLeft, FiSend, FiUser, FiHelpCircle } from "react-icons/fi";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "@/components/ui/sonner";
+
+interface Message {
+  id: number | string;
+  text: string;
+  isBot: boolean;
+}
 
 const Chatbot = () => {
-  const [messages, setMessages] = useState([
+  const [messages, setMessages] = useState<Message[]>([
     {
       id: 1,
       text: "Hello! I'm your VIORA health assistant. How can I help you today?",
@@ -14,33 +22,84 @@ const Chatbot = () => {
     },
   ]);
   const [inputMessage, setInputMessage] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
-  const sendMessage = () => {
-    if (inputMessage.trim() === "") return;
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const sendMessage = async () => {
+    if (inputMessage.trim() === "" || isLoading) return;
 
     const userMessage = {
-      id: messages.length + 1,
+      id: Date.now(),
       text: inputMessage,
       isBot: false,
     };
 
-    setMessages([...messages, userMessage]);
+    setMessages((prevMessages) => [...prevMessages, userMessage]);
     setInputMessage("");
+    setIsLoading(true);
 
-    // Simulate bot response (in a real app, this would be API call)
-    setTimeout(() => {
-      let botResponse = {
-        id: messages.length + 2,
+    try {
+      // Call the Gemini AI function
+      const response = await supabase.functions.invoke('gemini-chat', {
+        body: { message: inputMessage },
+      });
+
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to get a response");
+      }
+
+      const botMessage = {
+        id: Date.now() + 1,
+        text: response.data.response || "I'm sorry, I couldn't process your request at the moment.",
         isBot: true,
-        text: "Thank you for your message. Our AI assistant is currently being trained to provide accurate medical information. In the meantime, would you like me to connect you with educational resources or a specialist?",
+      };
+
+      setMessages((prevMessages) => [...prevMessages, botMessage]);
+
+      // Save conversation to database
+      try {
+        // Note: In a production app, we would first check if user is authenticated
+        // and use their user_id, but for this demo we'll create conversations without user_id
+        const { data: conversationData, error: conversationError } = await supabase
+          .from('chat_conversations')
+          .insert({})
+          .select()
+          .single();
+
+        if (conversationError) throw conversationError;
+
+        await supabase.from('chat_messages').insert([
+          { conversation_id: conversationData.id, content: userMessage.text, is_bot: false },
+          { conversation_id: conversationData.id, content: botMessage.text, is_bot: true }
+        ]);
+      } catch (dbError) {
+        console.error("Failed to save conversation:", dbError);
+        // Don't show error to user - conversation still works even if saving fails
+      }
+    } catch (error) {
+      console.error("Error:", error);
+      toast.error("Sorry, I couldn't process your request. Please try again.");
+      
+      const errorMessage = {
+        id: Date.now() + 1,
+        text: "Sorry, there was an error processing your request. Please try again later.",
+        isBot: true,
       };
       
-      setMessages((prevMessages) => [...prevMessages, botResponse]);
-    }, 1000);
+      setMessages((prevMessages) => [...prevMessages, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !isLoading) {
       sendMessage();
     }
   };
@@ -56,7 +115,10 @@ const Chatbot = () => {
         <h1 className="text-xl font-bold">Health Assistant</h1>
       </div>
       
-      <div className="flex-1 overflow-y-auto p-4 bg-viora-background">
+      <div 
+        ref={messagesContainerRef}
+        className="flex-1 overflow-y-auto p-4 bg-viora-background"
+      >
         {messages.map((message) => (
           <div
             key={message.id}
@@ -77,10 +139,30 @@ const Chatbot = () => {
                   <span className="font-medium text-sm">VIORA Assistant</span>
                 </div>
               )}
-              <p className="text-sm">{message.text}</p>
+              <p className="text-sm whitespace-pre-line">{message.text}</p>
             </div>
           </div>
         ))}
+        <div ref={messagesEndRef} />
+        
+        {isLoading && (
+          <div className="flex justify-start mb-4">
+            <div className="bg-white rounded-2xl rounded-tl-none p-3 max-w-[80%] card-shadow">
+              <div className="flex items-center">
+                <div className="w-6 h-6 rounded-full bg-viora-light text-viora-primary flex items-center justify-center mr-2">
+                  <FiHelpCircle size={14} />
+                </div>
+                <span className="font-medium text-sm">VIORA Assistant</span>
+              </div>
+              <p className="text-sm mt-1">Thinking...</p>
+              <div className="flex gap-2 mt-2">
+                <div className="w-2 h-2 rounded-full bg-viora-primary animate-bounce"></div>
+                <div className="w-2 h-2 rounded-full bg-viora-primary animate-bounce" style={{ animationDelay: "0.2s" }}></div>
+                <div className="w-2 h-2 rounded-full bg-viora-primary animate-bounce" style={{ animationDelay: "0.4s" }}></div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       
       <div className="p-3 bg-white border-t sticky bottom-20">
@@ -91,10 +173,12 @@ const Chatbot = () => {
             onKeyDown={handleKeyDown}
             placeholder="Type your health question..."
             className="rounded-full border-gray-200"
+            disabled={isLoading}
           />
           <Button
             onClick={sendMessage}
             className="rounded-full bg-viora-primary hover:bg-viora-primary/80 px-4"
+            disabled={isLoading || inputMessage.trim() === ""}
           >
             <FiSend size={18} />
           </Button>
